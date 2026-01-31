@@ -1,6 +1,7 @@
-if 'rno' in st.session_state:
-    rno = st.session_state.rno
-    jcd = st.session_state.jcd
+import streamlit as st
+import requests
+from bs4 import BeautifulSoup
+import datetime  # ← これが抜けているのが原因です
     
     # 1. 本物のデータを取得（取れない場合はNoneが返る）
     t1, t4, t_min = get_live_times(jcd, rno)
@@ -38,3 +39,4 @@ if 'rno' in st.session_state:
             st.info("💡 穴目予想（展開・筋目）")
             for i, kumi in enumerate(aname, 1):
                 st.write(f"{i}位： **{kumi}**")
+
