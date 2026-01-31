@@ -1,30 +1,38 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import pandas as pd
+import datetime
 
-# ==========================================
-# 1. ロジック部 (本来の logic.py)
-# ==========================================
-def judge_prediction(t1, t4, is_women_race):
-    diff = t1 - t4
-    if diff >= 0.10:
-        return "4-5-1", f"⚠️ 中穴アラート！(タイム差:{diff:.2f})"
-    else:
-        return "1-2-3", "✅ 本命展開"
+# --- 1. スクレイピング関数 (公式サイトからデータを取る) ---
+def get_live_times(jcd, rno):
+    date = datetime.datetime.now().strftime("%Y%m%d")
+    url = f"https://www.boatrace.jp/owpc/pc/race/before?jcd={jcd}&rno={rno}&hd={date}"
+    
+    try:
+        response = requests.get(url)
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # 展示タイムのテーブルを探す
+        times = []
+        table = soup.select_one('table.is-w748')
+        if table:
+            # 各艇の展示タイムを抽出
+            rows = table.select('tbody')
+            for row in rows[:6]:
+                # 4番目のtd（展示タイムが入っている場所）を取得
+                t_val = row.select('td')[3].text.strip()
+                times.append(float(t_val))
+        
+        if len(times) >= 4:
+            return times[0], times[3], min(times) # 1号艇, 4号艇, 全艇の最速
+    except:
+        pass
+    return None, None, None
 
-# ==========================================
-# 2. スクレイピング部 (本来の scraper.py)
-# ==========================================
-def get_live_times(jcd, rno, date):
-    # テスト用ダミーデータ（後ほど本番スクレイピングに書き換え）
-    return 6.85, 6.74
-
-# ==========================================
-# 3. 画面表示部 (app.py)
-# ==========================================
+# --- 2. 画面表示部 ---
 st.set_page_config(page_title="競艇予測AI", layout="wide")
-st.title("🚤 競艇予測AI (完全合体版)")
+st.title("🚤 競艇予測AI (リアルタイム版)")
 
 STADIUMS = {
     "01": "桐生", "02": "戸田", "03": "江戸川", "04": "平和島", "05": "多摩川",
@@ -34,31 +42,49 @@ STADIUMS = {
     "21": "芦屋", "22": "福岡", "23": "唐津", "24": "大村"
 }
 
+# サイドバーに記録を表示（的中率修正用）
+st.sidebar.header("📊 予測履歴")
+st.sidebar.info("今後のアップデートでここに的中率を表示します")
+
 st.header("会場選択")
 cols = st.columns(6)
-selected_jcd = None
+selected_jcd = st.session_state.get('jcd', None)
 
 for i, (jcd, name) in enumerate(STADIUMS.items()):
     with cols[i % 6]:
         if st.button(f"{jcd} {name}", key=jcd, use_container_width=True):
-            selected_jcd = jcd
+            st.session_state.jcd = jcd
+            st.rerun()
 
-if selected_jcd:
+if 'jcd' in st.session_state:
+    selected_jcd = st.session_state.jcd
     st.divider()
     st.subheader(f"📍 {STADIUMS[selected_jcd]} のレース選択")
     r_cols = st.columns(12)
-    selected_r = None
+    
     for r in range(1, 13):
         with r_cols[r-1]:
             if st.button(f"{r}R", key=f"r{r}"):
-                selected_r = r
+                st.session_state.rno = r
 
-    if selected_r:
-        st.write(f"### {selected_r}R の予測分析")
+if 'rno' in st.session_state:
+    rno = st.session_state.rno
+    jcd = st.session_state.jcd
+    st.write(f"### {rno}R の予測分析を実行中...")
+    
+    # 本物のデータを取得
+    t1, t4, t_min = get_live_times(jcd, rno)
+    
+    if t1 and t4:
+        diff = t1 - t4
+        st.write(f"【展示タイム】 1号艇: {t1} / 4号艇: {t4} (差: {diff:.2f})")
         
-        # 予測実行
-        t1, t4 = get_live_times(selected_jcd, selected_r, "20260201")
-        eye, msg = judge_prediction(t1, t4, is_women_race=False)
-        
-        st.info(msg)
-        st.success(f"推奨買い目: {eye}")
+        # ロジック適用
+        if t4 == t_min and diff >= 0.10:
+            st.error(f"⚠️ 中穴アラート！ 4号艇が最速かつ1号艇と0.10秒以上の差")
+            st.subheader("推奨買い目: **4-5-1** / 4-1-5")
+        else:
+            st.success("✅ 本命展開: 1号艇の逃げが濃厚です")
+            st.subheader("推奨買い目: **1-2-3** / 1-2-4")
+    else:
+        st.warning("⏳ 展示タイムがまだ公開されていないか、取得できませんでした。")
