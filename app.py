@@ -1,100 +1,132 @@
 import streamlit as st
-import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 import datetime
+import pandas as pd
 import os
 
-# --- 設定データ ---
+# --- 設定・定数 ---
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
 STADIUMS = {"01":"桐生","02":"戸田","03":"江戸川","04":"平和島","05":"多摩川","06":"浜名湖","07":"蒲郡","08":"常滑","09":"津","10":"三国","11":"びわこ","12":"住之江","13":"尼崎","14":"鳴門","15":"丸亀","16":"児島","17":"宮島","18":"徳山","19":"下関","20":"若松","21":"芦屋","22":"福岡","23":"唐津","24":"大村"}
 
-st.set_page_config(page_title="競艇的中率分析AI", layout="wide")
-
-tab1, tab2 = st.tabs(["📝 予想入力・保存", "📊 成績分析ダッシュボード"])
-
-with tab1:
-    st.title("🚤 艇番入力・記録")
+# --- 1. 公式サイトから出走表・タイムを自動取得 ---
+def fetch_race_data(jcd, rno):
+    date = datetime.datetime.now().strftime("%Y%m%d")
+    idx_url = f"https://www.boatrace.jp/owpc/pc/race/index?jcd={jcd}&rno={rno}&hd={date}"
+    bef_url = f"https://www.boatrace.jp/owpc/pc/race/before?jcd={jcd}&rno={rno}&hd={date}"
     
-    with st.expander("📌 レース基本設定", expanded=True):
-        c_st, c_rn, c_co = st.columns(3)
-        with c_st: jcd = st.selectbox("会場", list(STADIUMS.keys()), format_func=lambda x: STADIUMS[x])
-        with c_rn: rno = st.number_input("レース番号", 1, 12, 1)
-        with c_co: condition = st.radio("水面/環境", ["通常", "満潮", "干潮", "強風"], horizontal=True)
-
-    st.subheader("👤 選手データ（確認用）")
-    col_names = st.columns(6)
-    players_info = []
-    for i in range(1, 7):
-        with col_names[i-1]:
-            name = st.text_input(f"{i}号艇 選手名", key=f"nm{i}")
-            rank = st.selectbox(f"級別", ["A1", "A2", "B1", "B2"], key=f"rk{i}")
-            players_info.append({"name": name, "rank": rank})
-
-    st.divider()
-
-    st.subheader("✍️ あなたの予想")
-    y1, y2, y3 = st.columns(3)
-    with y1: my_1 = st.number_input("1着", 1, 6, 1, key="y1")
-    with y2: my_2 = st.number_input("2着", 1, 6, 2, key="y2")
-    with y3: my_3 = st.number_input("3着", 1, 6, 3, key="y3")
+    res_data = {"players": [], "times": [], "title": "", "error": False}
     
-    # 艇番の組み合わせ。Excelの日付変換を防ぐため、保存直前に細工をします
-    my_comb_raw = f"{my_1}-{my_2}-{my_3}"
-
-    if st.button("💾 予想をCSVに保存", use_container_width=True):
-        now_str = datetime.datetime.now().strftime("%Y/%m/%d %H:%M")
+    try:
+        # 【出走表スキャン】
+        r_idx = requests.get(idx_url, headers=HEADERS, timeout=7)
+        soup_idx = BeautifulSoup(r_idx.content, "html.parser")
         
-        # 保存用のデータ（頭に ' をつけてExcelの日付化を防止）
-        history_dict = {
-            "日時": now_str,
-            "会場": STADIUMS[jcd],
-            "レース": f"{rno}R",
-            "状況": condition,
-            "1号艇": f"{players_info[0]['name']}({players_info[0]['rank']})",
-            "あなたの予想": f"'{my_comb_raw}", 
-            "結果": "" 
-        }
-        df = pd.DataFrame([history_dict])
-        csv_file = "race_history.csv"
-        
-        # 追記保存
-        df.to_csv(csv_file, mode='a', index=False, header=not os.path.exists(csv_file), encoding="utf-8-sig")
-        st.success(f"✅ 予想 {my_comb_raw} を保存しました。")
+        boxes = soup_idx.select('tbody.is-p_top10')
+        for box in boxes[:6]:
+            name = box.select_one('div.is-fs18 a').get_text(strip=True).split(' ')[0] if box.select_one('div.is-fs18 a') else "？"
+            # 級別をテキストから直接抽出
+            txt = box.get_text()
+            rank = "B1"
+            for r in ["A1", "A2", "B2"]:
+                if r in txt: rank = r; break
+            res_data["players"].append({"name": name, "rank": rank})
 
-with tab2:
-    st.title("📊 的中率分析")
+        # 【展示タイムスキャン】
+        r_bef = requests.get(bef_url, headers=HEADERS, timeout=7)
+        soup_bef = BeautifulSoup(r_bef.content, "html.parser")
+        tds = soup_bef.select('td')
+        for td in tds:
+            val = td.get_text(strip=True)
+            if "." in val and len(val) == 4:
+                try: res_data["times"].append(float(val))
+                except: pass
+        
+        if len(res_data["players"]) < 6: res_data["error"] = True
+    except:
+        res_data["error"] = True
+    return res_data
+
+# --- 2. 予測エンジン ---
+def generate_prediction(data):
+    p1 = data["players"][0]
+    p4 = data["players"][3]
+    t1 = data["times"][0] if len(data["times"]) >= 6 else 9.99
+    t4 = data["times"][3] if len(data["times"]) >= 6 else 9.99
     
-    if os.path.exists("race_history.csv"):
-        # CSVを読み込む（すべて文字列として扱う）
-        df_analysis = pd.read_csv("race_history.csv", dtype=str).fillna("")
-        
-        # 分析用に ' を除去して比較しやすくする
-        df_analysis["あなたの予想"] = df_analysis["あなたの予想"].str.replace("'", "", regex=False)
-        df_analysis["結果"] = df_analysis["結果"].str.replace("'", "", regex=False)
-        
-        # 結果列が入っているデータだけを抽出
-        df_judged = df_analysis[df_analysis["結果"] != ""].copy()
-        
-        if not df_judged.empty:
-            # 的中判定
-            df_judged["的中"] = df_judged["あなたの予想"] == df_judged["結果"]
-            hit_count = df_judged["的中"].sum()
-            total_count = len(df_judged)
-            hit_rate = (hit_count / total_count * 100) if total_count > 0 else 0
-            
-            m1, m2, m3 = st.columns(3)
-            m1.metric("総勝負数", f"{total_count} レース")
-            m2.metric("的中数", f"{hit_count} 回")
-            m3.metric("的中率", f"{hit_rate:.1f} %")
-            
-            st.divider()
-            st.subheader("🔎 的中・不的中リスト")
-            # 的中している行をわかりやすく表示
-            st.dataframe(df_judged, use_container_width=True)
-            
-            if total_count > 0:
-                st.subheader("🏟 会場別の的中数")
-                st.bar_chart(df_judged.groupby("会場")["的中"].sum())
-        else:
-            st.info("💡 CSVの『結果』列に、正解（例：1-2-3）を記入して保存してください。")
-            st.dataframe(df_analysis)
+    # 基本ロジック（イン逃げ信頼度）
+    if p1['rank'] == "A1":
+        honmei = ["1-2-3", "1-2-4", "1-3-2", "1-3-4", "1-2-5"]
+    elif p1['rank'] == "A2":
+        honmei = ["1-2-3", "1-3-2", "2-1-3", "1-2-4", "1-4-2"]
     else:
-        st.warning("履歴データが見つかりません。まずは予想を入力して保存してください。")
+        honmei = ["1-2-3", "2-1-3", "3-1-2", "1-3-2", "2-3-1"]
+
+    # 穴目（4カド・展示タイム差）
+    is_ana = (t4 <= t1 - 0.08)
+    if is_ana:
+        aname = ["4-5-1", "4-5-6", "4-1-5", "4-1-2"]
+    else:
+        aname = ["4-1-2", "2-3-4", "4-5-1", "1-4-5"]
+        
+    return honmei, aname, is_ana
+
+# --- 3. UI画面 ---
+st.set_page_config(page_title="完全自動・競艇予測ソフト", layout="wide")
+st.title("🚤 競艇全自動予測 AI-BOT")
+
+# 会場・レース選択
+st.sidebar.header("📝 レース選択")
+jcd = st.sidebar.selectbox("会場", list(STADIUMS.keys()), format_func=lambda x: STADIUMS[x])
+rno = st.sidebar.number_input("レース番号", 1, 12, 1)
+
+if st.sidebar.button("🚀 予測を実行する", use_container_width=True):
+    with st.spinner('公式サイトからリアルタイムデータを取得中...'):
+        data = fetch_race_data(jcd, rno)
+    
+    if data["error"]:
+        st.error("データの取得に失敗しました。時間をおいて再度お試しください。")
+    else:
+        # 予測計算
+        honmei, aname, is_ana = generate_prediction(data)
+        
+        # 結果表示
+        st.header(f"📍 {STADIUMS[jcd]} 第{rno}R 予測結果")
+        
+        # 選手情報カード
+        cols = st.columns(6)
+        for i, p in enumerate(data["players"]):
+            with cols[i]:
+                st.markdown(f"""<div style="text-align:center; border:1px solid #ddd; padding:10px; border-radius:10px;">
+                <small>{i+1}号艇</small><br><b>{p['name']}</b><br><span style="color:red;">{p['rank']}</span>
+                </div>""", unsafe_allow_html=True)
+        
+        st.divider()
+
+        # 予測パネル
+        c1, c2 = st.columns(2)
+        with c1:
+            st.success("🎯 AI 本命予想")
+            for i, k in enumerate(honmei[:5], 1):
+                st.write(f"{i}位： **{k}**")
+        with c2:
+            if is_ana: st.error("🔥 AI 穴目予想（4カド・タイム優勢）")
+            else: st.info("💡 AI 穴目予想")
+            for i, k in enumerate(aname[:4], 1):
+                st.write(f"{i}位： **{k}**")
+
+        # 履歴保存（CSV）
+        history_file = "race_history.csv"
+        now = datetime.datetime.now().strftime("%Y/%m/%d %H:%M")
+        new_history = pd.DataFrame([{
+            "日時": now, "会場": STADIUMS[jcd], "レース": f"{rno}R",
+            "1号艇": data['players'][0]['name'], "AI本命": honmei[0], "結果": ""
+        }])
+        new_history.to_csv(history_file, mode='a', index=False, header=not os.path.exists(history_file), encoding="utf-8-sig")
+        st.toast("予測データをCSVに記録しました")
+
+# 履歴表示（下部）
+if os.path.exists("race_history.csv"):
+    st.divider()
+    st.subheader("📊 予測履歴（保存先: race_history.csv）")
+    st.dataframe(pd.read_csv("race_history.csv").tail(5), use_container_width=True)
