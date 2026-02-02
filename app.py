@@ -3,13 +3,13 @@ import requests
 from bs4 import BeautifulSoup
 import datetime
 
-# --- ブラウザのふりをするための設定 ---
+# --- ブラウザ偽装設定 ---
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
 
-# --- 1. G級レース会場を全テキストから抽出 ---
-def get_stadium_status():
+# --- 1. G級レース会場の取得 ---
+def get_g_races():
     url = "https://www.boatrace.jp/owpc/pc/race/index"
     g_races = []
     try:
@@ -17,97 +17,86 @@ def get_stadium_status():
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # すべてのリンクをチェックしてJCDとグレードを紐付け
-        links = soup.select('a[href*="jcd="]')
-        for link in links:
-            text = link.get_text()
-            href = link.get('href')
+        # 開催場リストのセルを全探索
+        stadium_cells = soup.select('td.is-arrowNone')
+        for cell in stadium_cells:
+            # グレードアイコン（imgのalt）をチェック
+            img = cell.select_one('img')
             grade = ""
-            if "SG" in text: grade = "SG"
-            elif "G1" in text: grade = "G1"
-            elif "G2" in text: grade = "G2"
-            elif "G3" in text: grade = "G3"
+            if img:
+                alt = img.get('alt', '')
+                if 'SG' in alt: grade = "SG"
+                elif 'G1' in alt: grade = "G1"
+                elif 'G2' in alt: grade = "G2"
+                elif 'G3' in alt: grade = "G3"
             
-            if grade and "jcd=" in href:
-                jcd = href.split('jcd=')[1].split('&')[0]
-                # 重複を避けて追加
-                if not any(r['jcd'] == jcd for r in g_races):
-                    g_races.append({"jcd": jcd, "name": text.replace(grade, "").strip(), "grade": grade})
+            if grade:
+                link = cell.select_one('a')
+                if link and 'jcd=' in link.get('href'):
+                    jcd = link.get('href').split('jcd=')[1].split('&')[0]
+                    name_tag = cell.select_one('div.is-jcd')
+                    name = name_tag.get_text(strip=True) if name_tag else "不明"
+                    g_races.append({"jcd": jcd, "name": name, "grade": grade})
     except: pass
     return g_races
 
-# --- 2. 選手名・ランク・タイムを構造に頼らず抽出 ---
-def get_fresh_race_data(jcd, rno):
+# --- 2. 出走表（選手名・級別）の厳密取得 ---
+def get_race_table(jcd, rno):
     date = datetime.datetime.now().strftime("%Y%m%d")
-    idx_url = f"https://www.boatrace.jp/owpc/pc/race/index?jcd={jcd}&rno={rno}&hd={date}"
-    bef_url = f"https://www.boatrace.jp/owpc/pc/race/before?jcd={jcd}&rno={rno}&hd={date}"
+    url = f"https://www.boatrace.jp/owpc/pc/race/index?jcd={jcd}&rno={rno}&hd={date}"
     
-    data = {"t1": None, "t4": None, "t_min": 9.99, "players": []}
-    
+    players = []
     try:
-        # 【選手情報】
-        res_idx = requests.get(idx_url, headers=HEADERS, timeout=7)
-        soup_idx = BeautifulSoup(res_idx.text, 'html.parser')
+        res = requests.get(url, headers=HEADERS, timeout=7)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, 'html.parser')
         
-        # 1〜6号艇のブロックを抽出
-        player_boxes = soup_idx.select('tbody.is-p_top10')
-        for i in range(6):
-            if i < len(player_boxes):
-                box = player_boxes[i]
-                name_tag = box.select_one('div.is-fs18 a')
-                name = name_tag.get_text(strip=True).split(' ')[0] if name_tag else f"{i+1}号艇"
-                
-                # テキスト全体からランクを探す
-                txt = box.get_text()
-                rank = "B1"
-                for r in ["A1", "A2", "B2"]:
-                    if r in txt:
-                        rank = r
-                        break
-                data["players"].append({"name": name, "rank": rank})
-            else:
-                data["players"].append({"name": f"{i+1}号艇", "rank": "B1"})
-
-        # 【展示タイム】
-        res_bef = requests.get(bef_url, headers=HEADERS, timeout=7)
-        soup_bef = BeautifulSoup(res_bef.text, 'html.parser')
-        # 数字（タイム）らしきものを全抽出
-        times = []
-        for td in soup_bef.select('td'):
-            val = td.get_text(strip=True)
-            if len(val) == 4 and "." in val:
-                try: times.append(float(val))
-                except: pass
+        # 1号艇〜6号艇のデータが入っているtbodyを特定
+        # 公式サイトでは is-p_top10 というクラスが各艇のブロック
+        rows = soup.select('tbody.is-p_top10')
         
-        if len(times) >= 6:
-            data["t1"], data["t4"], data["t_min"] = times[0], times[3], min(times)
-    except: pass
-    return data
+        for i, row in enumerate(rows[:6]):
+            # 名字の抽出 (div.is-fs18 内の a タグ)
+            name_element = row.select_one('div.is-fs18 a')
+            full_name = name_element.get_text(strip=True) if name_element else f"艇番{i+1}"
+            last_name = full_name.replace('\u3000', ' ').split(' ')[0] # 名字のみ
+            
+            # 級別の抽出 (spanタグのクラス名から判定)
+            rank = "不明"
+            rank_tag = row.select_one('span[class*="is-rank"]')
+            if rank_tag:
+                rank = rank_tag.get_text(strip=True)
+            
+            players.append({"name": last_name, "rank": rank})
+    except Exception as e:
+        print(f"Error: {e}")
+    return players
 
-# --- 3. メインUI ---
-st.set_page_config(page_title="競艇予測AI", layout="wide")
-STADIUMS = {"01":"桐生","02":"戸田","03":"江戸川","04":"平和島","05":"多摩川","06":"浜名湖","07":"蒲郡","08":"常滑","09":"津","10":"三国","11":"びわこ","12":"住之江","13":"尼崎","14":"鳴門","15":"丸亀","16":"児島","17":"宮島","18":"徳山","19":"下関","20":"若松","21":"芦屋","22":"福岡","23":"唐津","24":"大村"}
+# --- UI部 ---
+st.set_page_config(page_title="競艇出走表取得", layout="wide")
+st.title("🚤 競艇出走表・リアルタイム同期")
 
-st.title("🚤 競艇予測AI (安定稼働版)")
-
-# G級表示（セッションで保持せず毎回取得）
-g_list = get_stadium_status()
+# 1. グレードレース表示
+g_list = get_g_races()
 if g_list:
-    st.markdown("### 🔥 本日のグレードレース")
+    st.subheader("🔥 本日のグレードレース開催会場")
     g_cols = st.columns(len(g_list))
     for i, r in enumerate(g_list):
-        if g_cols[i].button(f"🏆 {r['grade']} {r['name']}", key=f"g_{r['jcd']}_{i}", use_container_width=True):
-            st.session_state.jcd, st.session_state.rno = r['jcd'], None
+        if g_cols[i].button(f"🏆 {r['grade']} {r['name']}", key=f"g_{r['jcd']}"):
+            st.session_state.jcd = r['jcd']
             st.rerun()
-    st.divider()
+st.divider()
 
+# 2. 会場選択
+STADIUMS = {"01":"桐生","02":"戸田","03":"江戸川","04":"平和島","05":"多摩川","06":"浜名湖","07":"蒲郡","08":"常滑","09":"津","10":"三国","11":"びわこ","12":"住之江","13":"尼崎","14":"鳴門","15":"丸亀","16":"児島","17":"宮島","18":"徳山","19":"下関","20":"若松","21":"芦屋","22":"福岡","23":"唐津","24":"大村"}
 st.header("会場選択")
 cols = st.columns(8)
 for i, (jcd, name) in enumerate(STADIUMS.items()):
-    if cols[i % 8].button(name, key=f"v_{jcd}", use_container_width=True):
-        st.session_state.jcd, st.session_state.rno = jcd, None
+    if cols[i % 8].button(name, key=f"st_{jcd}"):
+        st.session_state.jcd = jcd
         st.rerun()
 
+# 3. レース番号と出走表の表示
 if 'jcd' in st.session_state:
     st.divider()
     st.subheader(f"📍 {STADIUMS[st.session_state.jcd]} レース選択")
@@ -117,45 +106,22 @@ if 'jcd' in st.session_state:
             st.session_state.rno = r
             st.rerun()
 
-# --- 予測・分析表示 ---
-if 'jcd' in st.session_state and 'rno' in st.session_state:
-    st.divider()
-    with st.spinner('最新データを解析中...'):
-        res = get_fresh_race_data(st.session_state.jcd, st.session_state.rno)
-    
-    if len(res["players"]) >= 6:
-        p1, p4 = res["players"][0], res["players"][3]
+    if 'rno' in st.session_state:
+        st.markdown(f"### 【第 {st.session_state.rno} レース 出走表】")
+        with st.spinner('公式サイトから選手データを読み込み中...'):
+            players = get_race_table(st.session_state.jcd, st.session_state.rno)
         
-        st.markdown(f"""<div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 10px solid #ff4b4b;">
-            <h2 style="margin:0;">分析：{STADIUMS[st.session_state.jcd]} 第 {st.session_state.rno} レース</h2>
-            <p style="font-size:22px; margin-top:10px;"><b>1号艇：{p1['name']} ({p1['rank']}) ／ 4号艇：{p4['name']} ({p4['rank']})</b></p>
-        </div>""", unsafe_allow_html=True)
-
-        is_t = res["t1"] is not None
-        diff = (res["t1"] - res["t4"]) if is_t else 0.0
-        is_ana = (is_t and res["t4"] == res["t_min"] and diff >= 0.10)
-
-        # 予測アルゴリズム
-        if p1['rank'] == "A1": honmei = ["1-2-3", "1-2-4", "1-3-2", "1-3-4", "1-4-2"]
-        elif p1['rank'] == "A2": honmei = ["1-2-3", "1-3-2", "1-2-4", "1-4-2", "2-1-3"]
-        else: honmei = ["1-2-3", "1-3-2", "2-1-3", "3-1-2", "1-2-4"]
-        
-        aname = ["4-5-1", "4-5-6", "4-1-5"] if is_ana else ["4-1-2", "4-2-1", "4-1-5"]
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("🎯 本命予想")
-            for i, k in enumerate(honmei, 1): st.write(f"{i}位： **{k}**")
-        with c2:
-            if is_ana: st.error("🔥 穴目予想 (タイム差アリ)")
-            else: st.info("💡 穴目予想")
-            for i, k in enumerate(aname, 1): st.write(f"{i}位： **{k}**")
-
-        st.divider()
-        st.subheader("📝 予測の根拠")
-        st.write(f"・1号艇 **{p1['name']}選手 ({p1['rank']})** の実力を軸に設定。")
-        if is_t:
-            st.write(f"・展示タイムを反映。1号艇({res['t1']})と4号艇({res['t4']})の差は **{diff:.2f}秒** です。")
-            if is_ana: st.write(f"・4号艇 **{p4['name']}選手** が最速かつ大幅なタイム差をつけているため穴目推奨。")
+        if players:
+            # 取得したデータを表形式で表示
+            cols_p = st.columns(6)
+            for i, p in enumerate(players):
+                with cols_p[i]:
+                    st.markdown(f"""
+                    <div style="border: 2px solid #ccc; padding: 10px; border-radius: 5px; text-align: center;">
+                        <span style="font-size: 20px; font-weight: bold;">{i+1}号艇</span><br>
+                        <span style="font-size: 24px;">{p['name']}</span><br>
+                        <span style="color: #ff4b4b; font-weight: bold;">{p['rank']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
         else:
-            st.markdown("・<span style='color:red;'>⚠️ 展示タイムがまだ出ていないため、番組表のデータのみで算出しています。</span>", unsafe_allow_html=True)
+            st.error("選手データが取得できませんでした。時間をおいて再度お試しください。")
