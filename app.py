@@ -36,43 +36,49 @@ with tab1:
     with y2: my_2 = st.number_input("2着", 1, 6, 2, key="y2")
     with y3: my_3 = st.number_input("3着", 1, 6, 3, key="y3")
     
-    # ★ Excel対策：頭に ' をつけて文字列として扱う
-    my_comb = f"'{my_1}-{my_2}-{my_3}"
+    # 艇番の組み合わせ。Excelの日付変換を防ぐため、保存直前に細工をします
+    my_comb_raw = f"{my_1}-{my_2}-{my_3}"
 
     if st.button("💾 予想をCSVに保存", use_container_width=True):
         now_str = datetime.datetime.now().strftime("%Y/%m/%d %H:%M")
         
+        # 保存用のデータ（頭に ' をつけてExcelの日付化を防止）
         history_dict = {
             "日時": now_str,
             "会場": STADIUMS[jcd],
             "レース": f"{rno}R",
             "状況": condition,
             "1号艇": f"{players_info[0]['name']}({players_info[0]['rank']})",
-            "あなたの予想": my_comb,
+            "あなたの予想": f"'{my_comb_raw}", 
             "結果": "" 
         }
         df = pd.DataFrame([history_dict])
         csv_file = "race_history.csv"
         
+        # 追記保存
         df.to_csv(csv_file, mode='a', index=False, header=not os.path.exists(csv_file), encoding="utf-8-sig")
-        st.success(f"✅ 予想 {my_comb.replace(\"'\", \"\")} を保存しました。")
+        st.success(f"✅ 予想 {my_comb_raw} を保存しました。")
 
 with tab2:
     st.title("📊 的中率分析")
     
     if os.path.exists("race_history.csv"):
-        df_analysis = pd.read_csv("race_history.csv", dtype=str)
-        # 分析時に ' を取り除いて比較する
-        df_analysis["あなたの予想"] = df_analysis["あなたの予想"].str.replace("'", "")
-        df_analysis["結果"] = df_analysis["結果"].str.replace("'", "")
+        # CSVを読み込む（すべて文字列として扱う）
+        df_analysis = pd.read_csv("race_history.csv", dtype=str).fillna("")
         
-        df_judged = df_analysis[df_analysis["結果"].notna() & (df_analysis["結果"] != "")]
+        # 分析用に ' を除去して比較しやすくする
+        df_analysis["あなたの予想"] = df_analysis["あなたの予想"].str.replace("'", "", regex=False)
+        df_analysis["結果"] = df_analysis["結果"].str.replace("'", "", regex=False)
+        
+        # 結果列が入っているデータだけを抽出
+        df_judged = df_analysis[df_analysis["結果"] != ""].copy()
         
         if not df_judged.empty:
+            # 的中判定
             df_judged["的中"] = df_judged["あなたの予想"] == df_judged["結果"]
             hit_count = df_judged["的中"].sum()
             total_count = len(df_judged)
-            hit_rate = (hit_count / total_count) * 100
+            hit_rate = (hit_count / total_count * 100) if total_count > 0 else 0
             
             m1, m2, m3 = st.columns(3)
             m1.metric("総勝負数", f"{total_count} レース")
@@ -81,7 +87,14 @@ with tab2:
             
             st.divider()
             st.subheader("🔎 的中・不的中リスト")
+            # 的中している行をわかりやすく表示
             st.dataframe(df_judged, use_container_width=True)
+            
+            if total_count > 0:
+                st.subheader("🏟 会場別の的中数")
+                st.bar_chart(df_judged.groupby("会場")["的中"].sum())
         else:
-            st.info("💡 CSVの『結果』列に正解を記入して保存してください。")
+            st.info("💡 CSVの『結果』列に、正解（例：1-2-3）を記入して保存してください。")
             st.dataframe(df_analysis)
+    else:
+        st.warning("履歴データが見つかりません。まずは予想を入力して保存してください。")
