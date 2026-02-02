@@ -1,127 +1,79 @@
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
+import pandas as pd
 import datetime
+import os
 
-# --- ブラウザ偽装設定 ---
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
+# --- 設定データ ---
+STADIUMS = {"01":"桐生","02":"戸田","03":"江戸川","04":"平和島","05":"多摩川","06":"浜名湖","07":"蒲郡","08":"常滑","09":"津","10":"三国","11":"びわこ","12":"住之江","13":"尼崎","14":"鳴門","15":"丸亀","16":"児島","17":"宮島","18":"徳山","19":"下関","20":"若松","21":"芦屋","22":"福岡","23":"唐津","24":"大村"}
 
-# --- 1. G級レース会場の取得 ---
-def get_g_races():
-    url = "https://www.boatrace.jp/owpc/pc/race/index"
-    g_races = []
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=7)
-        res.encoding = res.apparent_encoding
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 開催場リストのセルを全探索
-        stadium_cells = soup.select('td.is-arrowNone')
-        for cell in stadium_cells:
-            # グレードアイコン（imgのalt）をチェック
-            img = cell.select_one('img')
-            grade = ""
-            if img:
-                alt = img.get('alt', '')
-                if 'SG' in alt: grade = "SG"
-                elif 'G1' in alt: grade = "G1"
-                elif 'G2' in alt: grade = "G2"
-                elif 'G3' in alt: grade = "G3"
-            
-            if grade:
-                link = cell.select_one('a')
-                if link and 'jcd=' in link.get('href'):
-                    jcd = link.get('href').split('jcd=')[1].split('&')[0]
-                    name_tag = cell.select_one('div.is-jcd')
-                    name = name_tag.get_text(strip=True) if name_tag else "不明"
-                    g_races.append({"jcd": jcd, "name": name, "grade": grade})
-    except: pass
-    return g_races
+st.set_page_config(page_title="競艇ハイブリッド予想", layout="wide")
+st.title("🚤 艇番入力型・予想記録ツール")
 
-# --- 2. 出走表（選手名・級別）の厳密取得 ---
-def get_race_table(jcd, rno):
-    date = datetime.datetime.now().strftime("%Y%m%d")
-    url = f"https://www.boatrace.jp/owpc/pc/race/index?jcd={jcd}&rno={rno}&hd={date}"
-    
-    players = []
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=7)
-        res.encoding = res.apparent_encoding
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 1号艇〜6号艇のデータが入っているtbodyを特定
-        # 公式サイトでは is-p_top10 というクラスが各艇のブロック
-        rows = soup.select('tbody.is-p_top10')
-        
-        for i, row in enumerate(rows[:6]):
-            # 名字の抽出 (div.is-fs18 内の a タグ)
-            name_element = row.select_one('div.is-fs18 a')
-            full_name = name_element.get_text(strip=True) if name_element else f"艇番{i+1}"
-            last_name = full_name.replace('\u3000', ' ').split(' ')[0] # 名字のみ
-            
-            # 級別の抽出 (spanタグのクラス名から判定)
-            rank = "不明"
-            rank_tag = row.select_one('span[class*="is-rank"]')
-            if rank_tag:
-                rank = rank_tag.get_text(strip=True)
-            
-            players.append({"name": last_name, "rank": rank})
-    except Exception as e:
-        print(f"Error: {e}")
-    return players
+# --- サイドバー：基本設定 ---
+with st.sidebar:
+    st.header("📌 レース設定")
+    jcd = st.selectbox("会場", list(STADIUMS.keys()), format_func=lambda x: STADIUMS[x])
+    rno = st.number_input("レース番号", 1, 12, 1)
+    condition = st.radio("水面/環境", ["通常", "満潮", "干潮", "強風"])
 
-# --- UI部 ---
-st.set_page_config(page_title="競艇出走表取得", layout="wide")
-st.title("🚤 競艇出走表・リアルタイム同期")
+# --- メインエリア：入力 ---
+st.header(f"📍 {STADIUMS[jcd]} 第{rno}R")
 
-# 1. グレードレース表示
-g_list = get_g_races()
-if g_list:
-    st.subheader("🔥 本日のグレードレース開催会場")
-    g_cols = st.columns(len(g_list))
-    for i, r in enumerate(g_list):
-        if g_cols[i].button(f"🏆 {r['grade']} {r['name']}", key=f"g_{r['jcd']}"):
-            st.session_state.jcd = r['jcd']
-            st.rerun()
+# 選手情報は手動入力（またはメモ）として利用
+col_names = st.columns(6)
+players_info = []
+for i in range(1, 7):
+    with col_names[i-1]:
+        name = st.text_input(f"{i}号艇 選手名", key=f"nm{i}", placeholder="苗字")
+        rank = st.selectbox(f"級別", ["A1", "A2", "B1", "B2"], key=f"rk{i}")
+        players_info.append({"name": name, "rank": rank})
+
 st.divider()
 
-# 2. 会場選択
-STADIUMS = {"01":"桐生","02":"戸田","03":"江戸川","04":"平和島","05":"多摩川","06":"浜名湖","07":"蒲郡","08":"常滑","09":"津","10":"三国","11":"びわこ","12":"住之江","13":"尼崎","14":"鳴門","15":"丸亀","16":"児島","17":"宮島","18":"徳山","19":"下関","20":"若松","21":"芦屋","22":"福岡","23":"唐津","24":"大村"}
-st.header("会場選択")
-cols = st.columns(8)
-for i, (jcd, name) in enumerate(STADIUMS.items()):
-    if cols[i % 8].button(name, key=f"st_{jcd}"):
-        st.session_state.jcd = jcd
-        st.rerun()
+# --- あなたの予想入力（数値） ---
+st.subheader("✍️ あなたの予想（艇番を数値で入力）")
+c1, c2, c3 = st.columns(3)
+with c1:
+    my_1st = st.number_input("1着（艇番）", 1, 6, 1)
+with c2:
+    my_2nd = st.number_input("2着（艇番）", 1, 6, 2)
+with c3:
+    my_3rd = st.number_input("3着（艇番）", 1, 6, 3)
 
-# 3. レース番号と出走表の表示
-if 'jcd' in st.session_state:
+my_combination = f"{my_1st}-{my_2nd}-{my_3rd}"
+
+# --- 保存と実行 ---
+if st.button("💾 予想を確定してCSVに保存", use_container_width=True):
+    # AIによる簡易補足（例：1号艇のランクによる信頼度）
+    target_rank = players_info[my_1st-1]["rank"]
+    if my_1st == 1 and target_rank == "A1":
+        ai_comment = "本命信頼度は高いです。"
+    else:
+        ai_comment = f"{my_1st}号艇の逆転展開を想定。"
+
+    # CSVデータ作成
+    history_dict = {
+        "日時": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "会場": STADIUMS[jcd],
+        "レース": f"{rno}R",
+        "水面": condition,
+        "1号艇": f"{players_info[0]['name']}({players_info[0]['rank']})",
+        "あなたの予想": my_combination,
+        "AIコメント": ai_comment,
+        "結果": ""
+    }
+    
+    # CSV保存
+    df = pd.DataFrame([history_dict])
+    csv_file = "race_history.csv"
+    df.to_csv(csv_file, mode='a', index=False, header=not os.path.exists(csv_file), encoding="utf-8-sig")
+    
+    st.success(f"✅ 予想「{my_combination}」を保存しました！")
+    st.info(f"🤖 AI分析: {ai_comment}")
+
+# --- 履歴表示 ---
+if os.path.exists("race_history.csv"):
     st.divider()
-    st.subheader(f"📍 {STADIUMS[st.session_state.jcd]} レース選択")
-    r_cols = st.columns(12)
-    for r in range(1, 13):
-        if r_cols[r-1].button(f"{r}R", key=f"r_{r}"):
-            st.session_state.rno = r
-            st.rerun()
-
-    if 'rno' in st.session_state:
-        st.markdown(f"### 【第 {st.session_state.rno} レース 出走表】")
-        with st.spinner('公式サイトから選手データを読み込み中...'):
-            players = get_race_table(st.session_state.jcd, st.session_state.rno)
-        
-        if players:
-            # 取得したデータを表形式で表示
-            cols_p = st.columns(6)
-            for i, p in enumerate(players):
-                with cols_p[i]:
-                    st.markdown(f"""
-                    <div style="border: 2px solid #ccc; padding: 10px; border-radius: 5px; text-align: center;">
-                        <span style="font-size: 20px; font-weight: bold;">{i+1}号艇</span><br>
-                        <span style="font-size: 24px;">{p['name']}</span><br>
-                        <span style="color: #ff4b4b; font-weight: bold;">{p['rank']}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-        else:
-            st.error("選手データが取得できませんでした。時間をおいて再度お試しください。")
+    st.subheader("📊 記録された予想履歴")
+    history_df = pd.read_csv("race_history.csv")
+    st.dataframe(history_df.tail(10), use_container_width=True)
